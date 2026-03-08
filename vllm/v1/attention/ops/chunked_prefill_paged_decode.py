@@ -351,6 +351,96 @@ def chunked_prefill_paged_decode(
     if not is_pow2:
         use_custom = False
 
+    use_cuda_custom = (
+        current_platform.is_cuda()
+        and is_pow2
+        and sliding_window == 0
+        and sinks is None
+        and not is_block_table_ptr
+    )
+
+    if use_cuda_custom:
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        if max_query_len <= 1:
+            num_decodes = num_seqs
+        elif query_lens[0].item() > 1:
+            num_decodes = 0
+        else:
+            is_prefill = query_lens > 1
+            num_decodes = (
+                is_prefill.int().argmax(dim=-1).item()
+                if torch.any(is_prefill)
+                else num_seqs
+            )
+
+        if num_decodes > 0:
+            num_decode_tokens = int(query_start_loc[num_decodes].item())
+            if num_decode_tokens == num_decodes:
+                decode_query = query[:num_decode_tokens]
+                decode_output = output[:num_decode_tokens]
+                decode_block_table = block_table[:num_decodes].to(torch.int32)
+                decode_seq_lens = seq_lens[:num_decodes]
+                decode_max_seq_len = int(decode_seq_lens.max().item())
+
+                if decode_max_seq_len <= 8192:
+                    ops.paged_attention_v1(
+                        decode_output,
+                        decode_query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        sm_scale,
+                        decode_block_table,
+                        decode_seq_lens,
+                        block_size,
+                        decode_max_seq_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                    )
+                else:
+                    partition_size = 512
+                    num_partitions = (
+                        decode_max_seq_len + partition_size - 1
+                    ) // partition_size
+                    tmp_output = torch.empty(
+                        size=(
+                            num_decodes,
+                            num_query_heads,
+                            num_partitions,
+                            head_size,
+                        ),
+                        dtype=output.dtype,
+                        device=output.device,
+                    )
+                    exp_sums = torch.empty(
+                        size=(num_decodes, num_query_heads, num_partitions),
+                        dtype=torch.float32,
+                        device=output.device,
+                    )
+                    max_logits = torch.empty_like(exp_sums)
+                    ops.paged_attention_v2(
+                        decode_output,
+                        exp_sums,
+                        max_logits,
+                        tmp_output,
+                        decode_query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        sm_scale,
+                        decode_block_table,
+                        decode_seq_lens,
+                        block_size,
+                        decode_max_seq_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                    )
+                return
+
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = (

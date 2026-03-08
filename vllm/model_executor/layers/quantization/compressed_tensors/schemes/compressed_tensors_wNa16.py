@@ -77,8 +77,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # Turing and up
-        return 75
+        # Pascal-class GPUs can still use the Exllama fallback for symmetric
+        # WNA16 checkpoints even though Marlin remains Turing+ only.
+        return 60
 
     def create_weights(
         self,

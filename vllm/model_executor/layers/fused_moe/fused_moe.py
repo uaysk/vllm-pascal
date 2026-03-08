@@ -1217,6 +1217,7 @@ def should_moe_wna16_use_cuda(
 ):
     return (
         current_platform.is_cuda()
+        and current_platform.has_device_capability((7, 0))
         and bit == 4
         and group_size in [32, 64, 128]
         and num_valid_tokens / num_experts <= 6

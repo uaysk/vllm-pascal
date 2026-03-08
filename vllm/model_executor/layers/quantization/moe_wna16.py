@@ -95,7 +95,9 @@ class MoeWNA16Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        # GPTQ-backed MoE can fall back to the Exllama path on Pascal-class GPUs.
+        # AWQ-backed MoE is still rejected separately in __init__.
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:

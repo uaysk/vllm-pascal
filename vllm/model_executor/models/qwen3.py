@@ -44,6 +44,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
@@ -54,6 +55,12 @@ from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
+
+
+def should_torch_compile_qwen3(vllm_config: VllmConfig) -> bool:
+    if current_platform.is_cuda() and not current_platform.has_device_capability(70):
+        return False
+    return True
 
 
 class Qwen3Attention(nn.Module):
@@ -249,7 +256,8 @@ ALL_DECODER_LAYER_TYPES = {
         "positions": -1,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
-    }
+    },
+    enable_if=should_torch_compile_qwen3,
 )
 class Qwen3Model(Qwen2Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

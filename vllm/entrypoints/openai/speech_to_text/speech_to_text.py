@@ -332,20 +332,42 @@ class OpenAISpeechToText(OpenAIServing):
                     raise ValueError("Invalid or unsupported audio file.") from exc
                 raise
 
-        duration = librosa.get_duration(y=y, sr=sr)
+        return await self._prepare_speech_to_text_from_array(
+            request=request,
+            audio=y,
+            sample_rate=int(sr),
+            request_id=request_id,
+        )
+
+    async def _prepare_speech_to_text_from_array(
+        self,
+        request: SpeechToTextRequest,
+        audio: np.ndarray,
+        sample_rate: int,
+        request_id: str,
+    ) -> tuple[list[ProcessorInputs], float]:
+        language = self.model_cls.validate_language(request.language)
+        to_language = (
+            self.model_cls.validate_language(request.to_language)
+            if request.to_language
+            else None
+        )
+
+        duration = librosa.get_duration(y=audio, sr=sample_rate)
         do_split_audio = (
             self.asr_config.allow_audio_chunking
+            and self.asr_config.max_audio_clip_s is not None
             and duration > self.asr_config.max_audio_clip_s
         )
 
         if not do_split_audio:
-            chunks = [y]
+            chunks = [audio]
         else:
             assert self.asr_config.max_audio_clip_s is not None
             assert self.asr_config.min_energy_split_window_size is not None
             chunks = split_audio(
-                audio_data=y,
-                sample_rate=int(sr),
+                audio_data=audio,
+                sample_rate=sample_rate,
                 max_clip_duration_s=self.asr_config.max_audio_clip_s,
                 overlap_duration_s=self.asr_config.overlap_chunk_second,
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
@@ -354,7 +376,6 @@ class OpenAISpeechToText(OpenAIServing):
         if language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
-            # Auto-detect language from the first chunk.
             language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
             )
@@ -362,8 +383,6 @@ class OpenAISpeechToText(OpenAIServing):
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
-            # The model has control over the construction, as long as it
-            # returns a valid PromptType.
             prompt = self.model_cls.get_generation_prompt(
                 audio=chunk,
                 stt_config=self.asr_config,
@@ -384,8 +403,21 @@ class OpenAISpeechToText(OpenAIServing):
             parsed_prompts.append(parsed_prompt)
 
         engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
-
         return engine_prompts, duration
+
+    async def prepare_realtime_chunk(
+        self,
+        request: SpeechToTextRequest,
+        audio: np.ndarray,
+        request_id: str,
+    ) -> tuple[list[ProcessorInputs], float]:
+        """Prepare already-decoded realtime audio for chunk transcription."""
+        return await self._prepare_speech_to_text_from_array(
+            request=request,
+            audio=audio,
+            sample_rate=self.asr_config.sample_rate,
+            request_id=request_id,
+        )
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]

@@ -598,11 +598,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        gdn_dtype = hidden_states.dtype
+        if current_platform.is_cuda() and not current_platform.has_device_capability(
+            70
+        ):
+            gdn_dtype = torch.float32
+
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
+            dtype=gdn_dtype,
             device=hidden_states.device,
         )
+
+        if gdn_dtype != hidden_states.dtype:
+            mixed_qkv = mixed_qkv.to(gdn_dtype)
+            b = b.to(gdn_dtype)
+            a = a.to(gdn_dtype)
 
         torch.ops.vllm.gdn_attention_core(
             mixed_qkv,
@@ -616,6 +627,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # Part 3: Output Projection
         # ============================================================
         z_shape_og = z.shape
+        if core_attn_out.dtype != z.dtype:
+            core_attn_out = core_attn_out.to(z.dtype)
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
@@ -1440,7 +1453,7 @@ def gdn_attention_core(
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """
     Custom op for the core attention computation.
     Only handles the convolution + recurrent attention part.
@@ -1454,6 +1467,7 @@ def gdn_attention_core(
         a=a,
         core_attn_out=core_attn_out,
     )
+    return core_attn_out
 
 
 def gdn_attention_core_fake(
@@ -1462,9 +1476,9 @@ def gdn_attention_core_fake(
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """Fake implementation for torch.compile."""
-    return
+    return core_attn_out
 
 
 direct_register_custom_op(

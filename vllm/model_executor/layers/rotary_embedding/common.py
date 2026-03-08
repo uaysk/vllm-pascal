@@ -229,7 +229,17 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        try:
+            from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        except (ImportError, ModuleNotFoundError):
+            if self.apply_rotary_emb_flash_attn is not None:
+                x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
+                interleaved = not self.is_neox_style
+                output = self.apply_rotary_emb_flash_attn(
+                    x, cos, sin, interleaved=interleaved
+                ).type_as(x)
+                return self._post_process(output, origin_shape, origin_dtype)
+            return self.forward_native(x, cos, sin)
 
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 

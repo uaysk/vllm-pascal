@@ -40,7 +40,7 @@ def find_seq_idx(
     BLOCK_Q: tl.constexpr,
     use_q_block_mode: tl.constexpr,
 ):
-    left: tl.int32 = 0
+    left = 0
     right = num_seqs
     while left < right:
         mid = (left + right) // 2
@@ -275,12 +275,9 @@ def kernel_unified_attention_2d(
         )
 
         if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            V = V_load.to(tl.float32) * tl.load(v_scale)
         else:
-            V = V_load
+            V = V_load.to(tl.float32)
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -382,7 +379,7 @@ def kernel_unified_attention_2d(
             )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        acc += tl.dot(P, V)
 
     # epilogue
     acc = acc / L[:, None]
@@ -630,12 +627,9 @@ def kernel_unified_attention_3d(
         )
 
         if V_load.dtype.is_fp8():
-            if Q.dtype.is_fp8():
-                V = V_load
-            else:
-                V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            V = V_load.to(tl.float32) * tl.load(v_scale)
         else:
-            V = V_load
+            V = V_load.to(tl.float32)
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -736,7 +730,7 @@ def kernel_unified_attention_3d(
             )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        acc += tl.dot(P, V)
 
     segm_output_offset = (
         query_offset_0[:, None].to(tl.int64)
@@ -938,6 +932,16 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+    use_pascal_fp16_output_fallback = (
+        output_scale is None
+        and q.dtype == torch.float16
+        and not current_platform.has_device_capability(80)
+    )
+    kernel_out = (
+        torch.empty_like(out, dtype=torch.float32)
+        if use_pascal_fp16_output_fallback
+        else out
+    )
 
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
@@ -992,7 +996,7 @@ def unified_attention(
                 num_kv_heads,
             )
         ](
-            output_ptr=out,
+            output_ptr=kernel_out,
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
@@ -1011,8 +1015,8 @@ def unified_attention(
             block_table_stride=block_table.stride(0),
             query_stride_0=q.stride(0),
             query_stride_1=q.stride(1),
-            output_stride_0=out.stride(0),
-            output_stride_1=out.stride(1),
+            output_stride_0=kernel_out.stride(0),
+            output_stride_1=kernel_out.stride(1),
             qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
             BLOCK_SIZE=block_size,
             TILE_SIZE=TILE_SIZE_PREFILL,
@@ -1094,7 +1098,7 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
-            output_ptr=out,
+            output_ptr=kernel_out,
             segm_output_ptr=softmax_segm_output,
             segm_max_ptr=softmax_segm_max,
             segm_expsum_ptr=softmax_segm_expsum,
@@ -1102,8 +1106,8 @@ def unified_attention(
             num_seqs=num_seqs,
             num_query_heads=num_query_heads,
             out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
-            output_stride_0=out.stride(0),
-            output_stride_1=out.stride(1),
+            output_stride_0=kernel_out.stride(0),
+            output_stride_1=kernel_out.stride(1),
             block_table_stride=block_table.stride(0),
             TILE_SIZE=TILE_SIZE_DECODE,
             HEAD_SIZE=head_size,
@@ -1113,3 +1117,6 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
         )
+
+    if use_pascal_fp16_output_fallback:
+        out.copy_(kernel_out)

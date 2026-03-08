@@ -12,6 +12,9 @@ from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.speech_to_text.serving import (
+    OpenAIServingTranscription,
+)
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
@@ -33,6 +36,7 @@ class OpenAIServingRealtime(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        transcription_serving: OpenAIServingTranscription | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -41,6 +45,7 @@ class OpenAIServingRealtime(OpenAIServing):
         )
 
         self.task_type: Literal["realtime"] = "realtime"
+        self.transcription_serving = transcription_serving
 
         logger.info("OpenAIServingRealtime initialized for task: %s", self.task_type)
 

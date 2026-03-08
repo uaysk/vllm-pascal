@@ -97,9 +97,9 @@ if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
   set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
 elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
+  set(CUDA_SUPPORTED_ARCHS "6.0;6.1;6.2;7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
 else()
-  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
+  set(CUDA_SUPPORTED_ARCHS "6.0;6.1;6.2;7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
 endif()
 
 #
@@ -990,6 +990,10 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 # _moe_C extension
 #
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  cuda_archs_loose_intersection(MOE_CUDA_PASCAL_ARCHS "6.0;6.1;6.2" "${CUDA_ARCHS}")
+endif()
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
@@ -997,9 +1001,12 @@ set(VLLM_MOE_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
-    "csrc/moe/moe_wna16.cu"
     "csrc/moe/grouped_topk_kernels.cu"
     "csrc/moe/router_gemm.cu")
+  if(NOT MOE_CUDA_PASCAL_ARCHS)
+    list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/moe_wna16.cu")
+  endif()
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -1014,7 +1021,7 @@ set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
+if(VLLM_GPU_LANG STREQUAL "CUDA" AND NOT MOE_CUDA_PASCAL_ARCHS)
   set(VLLM_MOE_WNA16_SRC
     "csrc/moe/moe_wna16.cu")
 
@@ -1164,6 +1171,10 @@ define_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+if(VLLM_GPU_LANG STREQUAL "CUDA" AND MOE_CUDA_PASCAL_ARCHS)
+  target_compile_definitions(_moe_C PRIVATE VLLM_DISABLE_MOE_WNA16_CUDA=1)
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
@@ -1191,9 +1202,27 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
-    include(cmake/external_projects/flashmla.cmake)
-    include(cmake/external_projects/qutlass.cmake)
+    cuda_archs_loose_intersection(CUDA_PASCAL_ARCHS "6.0;6.1;6.2" "${CUDA_ARCHS}")
+    if (CUDA_PASCAL_ARCHS)
+        message(STATUS
+            "Pascal CUDA architectures detected (${CUDA_PASCAL_ARCHS}); "
+            "skipping FlashMLA, QuTLASS, and vllm-flash-attn external projects. "
+            "Pascal builds use Triton/Torch fallbacks instead.")
+        add_custom_target(_vllm_fa2_C)
+        add_custom_target(_vllm_fa3_C)
+        add_custom_target(_vllm_fa4_cutedsl_C)
+        add_custom_target(_flashmla_C)
+        add_custom_target(_flashmla_extension_C)
+        install(CODE "" COMPONENT _vllm_fa2_C)
+        install(CODE "" COMPONENT _vllm_fa3_C)
+        install(CODE "" COMPONENT _vllm_fa4_cutedsl_C)
+        install(CODE "" COMPONENT _flashmla_C)
+        install(CODE "" COMPONENT _flashmla_extension_C)
+    else()
+        include(cmake/external_projects/flashmla.cmake)
+        include(cmake/external_projects/qutlass.cmake)
 
-    # vllm-flash-attn should be last as it overwrites some CMake functions
-    include(cmake/external_projects/vllm_flash_attn.cmake)
+        # vllm-flash-attn should be last as it overwrites some CMake functions
+        include(cmake/external_projects/vllm_flash_attn.cmake)
+    endif()
 endif ()

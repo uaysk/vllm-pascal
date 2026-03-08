@@ -52,6 +52,8 @@ def _get_backend_priorities(
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     if use_mla:
+        if device_capability < DeviceCapability(8, 0):
+            return [AttentionBackendEnum.TRITON_MLA]
         if device_capability.major == 10:
             # Prefer FlashInfer at low head counts (FlashMLA uses padding)
             if num_heads is not None and num_heads <= 16:
@@ -81,6 +83,11 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
+        if device_capability < DeviceCapability(8, 0):
+            return [
+                AttentionBackendEnum.CUDA_PAGED_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+            ]
         if device_capability.major == 10:
             return [
                 AttentionBackendEnum.FLASHINFER,
@@ -413,6 +420,14 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        cc = cls.get_device_capability()
+        if cc is not None and cc < DeviceCapability(7, 0):
+            return [AttentionBackendEnum.TORCH_SDPA]
+        if cc is not None and cc < DeviceCapability(8, 0):
+            return [
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+            ]
         return [
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TRITON_ATTN,
@@ -436,6 +451,12 @@ class CudaPlatformBase(Platform):
             return backend
 
         cc = cls.get_device_capability()
+        if cc is not None and cc < DeviceCapability(7, 0):
+            logger.info_once(
+                "Using backend %s for vit attention on pre-Volta CUDA devices",
+                AttentionBackendEnum.TORCH_SDPA,
+            )
+            return AttentionBackendEnum.TORCH_SDPA
         for vit_attn_backend in cls.get_supported_vit_attn_backends():
             if vit_attn_backend == AttentionBackendEnum.TORCH_SDPA:
                 continue

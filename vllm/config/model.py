@@ -897,6 +897,16 @@ class ModelConfig:
             # over the built-in ones.
             quantization_methods = quantization_methods + overrides
 
+            # If the user explicitly requested a quantization backend, only
+            # probe that backend plus the known override backends. Importing
+            # every quantization module eagerly is brittle on older torch/CUDA
+            # combinations and is unnecessary for explicit selection.
+            if self.quantization is not None:
+                quantization_methods = [
+                    self.quantization,
+                    *[q for q in overrides if q != self.quantization],
+                ]
+
             # Detect which checkpoint is it
             for name in quantization_methods:
                 method = me_quant.get_quantization_config(name)

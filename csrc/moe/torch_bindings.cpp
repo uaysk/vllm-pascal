@@ -60,6 +60,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM
+#ifndef VLLM_DISABLE_MOE_WNA16_CUDA
   m.def(
       "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
       "Tensor b_scales, Tensor? b_qzeros, "
@@ -69,6 +70,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int bit) -> Tensor");
 
   m.impl("moe_wna16_gemm", torch::kCUDA, &moe_wna16_gemm);
+#endif
 
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"

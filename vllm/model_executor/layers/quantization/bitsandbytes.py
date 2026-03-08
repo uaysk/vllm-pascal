@@ -6,6 +6,7 @@ from typing import Any, Union
 import torch
 from packaging import version
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -26,6 +27,8 @@ from vllm.model_executor.layers.quantization import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 
 def _check_bitsandbytes_version():
@@ -102,7 +105,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        return 60
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -419,6 +422,10 @@ def _apply_bnb_4bit_fake(
     return
 
 
+_apply_bnb_4bit = torch._dynamo.disable(_apply_bnb_4bit)
+_apply_bnb_4bit_fake = torch._dynamo.disable(_apply_bnb_4bit_fake)
+
+
 try:
     direct_register_custom_op(
         op_name="apply_bnb_4bit",
@@ -430,7 +437,12 @@ try:
     apply_bnb_4bit = torch.ops.vllm.apply_bnb_4bit
 
 except AttributeError as error:
-    raise error
+    logger.warning_once(
+        "Falling back to Python bitsandbytes 4-bit matmul wrapper because "
+        "custom op registration is unavailable on this torch build: %s",
+        error,
+    )
+    apply_bnb_4bit = _apply_bnb_4bit
 
 
 class BitsAndBytesMoEMethod(FusedMoEMethodBase):

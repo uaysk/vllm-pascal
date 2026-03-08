@@ -19,7 +19,14 @@ from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 if TYPE_CHECKING:
     from vllm.config.utils import Range
 
-from torch._inductor.custom_graph_pass import CustomGraphPass
+try:
+    from torch._inductor.custom_graph_pass import CustomGraphPass
+except ModuleNotFoundError:
+    class CustomGraphPass:  # type: ignore[no-redef]
+        """Compatibility shim for older PyTorch versions."""
+
+        def uuid(self) -> str:
+            raise NotImplementedError
 
 _pass_context = None
 P = ParamSpec("P")

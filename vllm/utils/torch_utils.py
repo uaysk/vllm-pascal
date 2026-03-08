@@ -5,9 +5,10 @@ import importlib.metadata
 import os
 import random
 import threading
-from collections.abc import Callable, Collection
+import types
+from collections.abc import Callable, Collection, Sequence as ABCSequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, List, Optional, TypeVar, Union, get_args, get_origin, get_type_hints
 
 import numpy as np
 import numpy.typing as npt
@@ -789,6 +790,47 @@ def supports_xpu_graph() -> bool:
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
+def _normalize_infer_schema_annotation(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+
+    if origin is list:
+        args = get_args(annotation)
+        return List[_normalize_infer_schema_annotation(args[0])] if args else List[Any]
+
+    if origin in (tuple, ABCSequence):
+        args = get_args(annotation)
+        if len(args) == 2 and args[1] is Ellipsis:
+            return List[_normalize_infer_schema_annotation(args[0])]
+        if args:
+            normalized = _normalize_infer_schema_annotation(args[0])
+            if all(arg == args[0] for arg in args):
+                return List[normalized]
+
+    if origin in (Union, types.UnionType):
+        args = tuple(_normalize_infer_schema_annotation(arg) for arg in get_args(annotation))
+        non_none = tuple(arg for arg in args if arg is not type(None))
+        if len(non_none) + 1 == len(args) and len(non_none) == 1:
+            return Optional[non_none[0]]
+        return Union[args]
+
+    return annotation
+
+
+def _normalize_op_func_annotations(op_func: Callable) -> None:
+    try:
+        annotations = get_type_hints(op_func)
+    except Exception:
+        annotations = getattr(op_func, "__annotations__", None)
+    if not annotations:
+        return
+
+    normalized = {
+        key: _normalize_infer_schema_annotation(value)
+        for key, value in annotations.items()
+    }
+    op_func.__annotations__ = normalized
+
+
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
@@ -821,7 +863,17 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    schema_str = infer_schema(op_func, mutates_args=mutates_args)
+    _normalize_op_func_annotations(op_func)
+    try:
+        schema_str = infer_schema(op_func, mutates_args=mutates_args)
+    except ValueError as e:
+        logger.warning(
+            "Skipping Python custom op registration for %s on torch %s: %s",
+            op_name,
+            torch.__version__,
+            e,
+        )
+        return
 
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)

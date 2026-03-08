@@ -178,6 +178,12 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
 )
 class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealtime):
     realtime_max_tokens = 64
+    realtime_isolated_chunks = False
+    realtime_use_transcription_chunks = False
+    realtime_segment_duration_s = 2.0
+    realtime_cumulative_decode = True
+    realtime_unfixed_chunk_num = 1
+    realtime_unfixed_token_num = 5
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -194,11 +200,9 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         sampling_rate = feature_extractor.sampling_rate
         tokenizer = cached_tokenizer_from_config(model_config)
 
-        # Use a small segment size for low-latency streaming.
-        segment_duration_s = 5.0
         buffer = Qwen3ASRRealtimeBuffer(
             sampling_rate=sampling_rate,
-            segment_duration_s=segment_duration_s,
+            segment_duration_s=cls.realtime_segment_duration_s,
         )
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
@@ -235,3 +239,43 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             sample_rate=feature_extractor.sampling_rate,
             min_energy_split_window_size=None,
         )
+
+    @classmethod
+    def build_realtime_prompt(
+        cls,
+        *,
+        audio: np.ndarray,
+        prefix_text: str,
+        model_config: ModelConfig,
+    ) -> PromptType:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_placeholder = cls.get_placeholder_str("audio", 0)
+        prompt_template = (
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n{prefix_text}"
+        )
+        return TokensPrompt(
+            prompt_token_ids=tokenizer.encode(prompt_template),
+            multi_modal_data={"audio": audio},
+        )
+
+    @classmethod
+    def trim_realtime_prefix(
+        cls,
+        *,
+        raw_text: str,
+        rollback_tokens: int,
+        model_config: ModelConfig,
+    ) -> str:
+        if not raw_text or rollback_tokens <= 0:
+            return raw_text
+
+        tokenizer = cached_tokenizer_from_config(model_config)
+        token_ids = tokenizer.encode(raw_text)
+        trim = rollback_tokens
+        while True:
+            end_idx = max(0, len(token_ids) - trim)
+            prefix = tokenizer.decode(token_ids[:end_idx]) if end_idx > 0 else ""
+            if "\ufffd" not in prefix or end_idx == 0:
+                return prefix
+            trim += 1

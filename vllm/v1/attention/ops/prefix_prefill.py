@@ -152,9 +152,7 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
     # compute query against context (no causal mask here)
-    for start_n in tl.range(
-        0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
-    ):
+    for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE):
         # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
         # replace one physical block every 17 32-Tile blocks
         # Calculate the logical block index of each of the 32 tokens
@@ -282,12 +280,7 @@ def _fwd_kernel(
     block_mask = tl.where(block_start_loc < cur_batch_query_len, 1, 0)
 
     # compute query against itself (with causal mask)
-    for start_n in tl.range(
-        0,
-        block_mask * (start_m + 1) * BLOCK_M,
-        BLOCK_N,
-        loop_unroll_factor=num_unroll_request,
-    ):
+    for start_n in tl.range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         k = tl.load(

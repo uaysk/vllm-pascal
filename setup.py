@@ -821,6 +821,26 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip()
 
 
+def _targets_pascal_cuda() -> bool:
+    if not _is_cuda():
+        return False
+
+    torch_arch_list = os.getenv("TORCH_CUDA_ARCH_LIST", "")
+    if re.search(r"(^|[;,\s])6\.[012]($|[;,\s])", torch_arch_list):
+        return True
+
+    cmake_args = os.getenv("CMAKE_ARGS", "")
+    if re.search(r"CMAKE_CUDA_ARCHITECTURES=(6[012]|6\.[012])\b", cmake_args):
+        return True
+
+    if torch.cuda.is_available():
+        major, _minor = torch.cuda.get_device_capability()
+        if major == 6:
+            return True
+
+    return False
+
+
 def get_rocm_version():
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
     # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
@@ -938,9 +958,11 @@ def get_requirements() -> list[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if "vllm-flash-attn" in req and cuda_major != "12":
+            if "vllm-flash-attn" in req and (
+                cuda_major != "12" or _targets_pascal_cuda()
+            ):
                 # vllm-flash-attn is built only for CUDA 12.x.
-                # Skip for other versions.
+                # Skip for other versions and for Pascal targets.
                 continue
             modified_requirements.append(req)
         requirements = modified_requirements
@@ -969,7 +991,7 @@ if _is_cuda() or _is_hip():
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
-if _is_cuda():
+if _is_cuda() and not _targets_pascal_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")

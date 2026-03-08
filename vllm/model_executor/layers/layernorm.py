@@ -478,6 +478,11 @@ class GemmaRMSNorm(CustomOp):
         if torch.compiler.is_compiling():
             return self.forward_native(x, residual)
 
+        if current_platform.is_cuda() and not current_platform.has_device_capability(
+            70
+        ):
+            return self.forward_native(x, residual)
+
         if not getattr(self, "_is_compiled", False):
             self._forward_static_no_residual = torch.compile(  # type: ignore
                 self._forward_static_no_residual

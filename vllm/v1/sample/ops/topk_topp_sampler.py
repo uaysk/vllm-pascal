@@ -248,7 +248,12 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if HAS_TRITON and logits.shape[0] >= 8:
+    use_triton_sampler = HAS_TRITON and logits.shape[0] >= 8
+    if use_triton_sampler and current_platform.is_cuda():
+        capability = current_platform.get_device_capability()
+        use_triton_sampler = capability is not None and capability.major >= 8
+
+    if use_triton_sampler:
         return apply_top_k_top_p_triton(logits, k, p)
 
     # Use pytorch sort implementation for small batch sizes.

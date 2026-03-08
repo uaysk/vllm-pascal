@@ -19,6 +19,139 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ---
 
+## Tesla P40 Build And Run
+
+This fork is patched to run vLLM on NVIDIA Tesla P40 / Pascal (`sm_61`) and has been validated with `Qwen/Qwen3-ASR-1.7B`.
+
+Tested environment:
+
+- GPU: Tesla P40 (`sm_61`)
+- Python: `3.12`
+- PyTorch: `2.5.1+cu121`
+- CUDA toolkit used for build: `12.1`
+- Recommended install mode: in a dedicated `venv`, then `pip install -e . --no-build-isolation`
+
+The commands below are the reproducible path used to build and run this fork on P40.
+
+### 1. Clone the fork
+
+```bash
+git clone https://github.com/uaysk/vllm-pascal.git
+cd vllm-pascal
+```
+
+### 2. Create and activate a virtual environment
+
+```bash
+python3.12 -m venv .venv-p40
+source .venv-p40/bin/activate
+python -m pip install --upgrade pip
+```
+
+### 3. Install build tools
+
+```bash
+python -m pip install \
+  "setuptools>=77,<81" \
+  wheel \
+  packaging \
+  cmake \
+  ninja \
+  jinja2 \
+  regex \
+  protobuf
+```
+
+### 4. Install a P40-compatible PyTorch stack
+
+The fork has been tested with CUDA 12.1 wheels:
+
+```bash
+python -m pip install \
+  --index-url https://download.pytorch.org/whl/cu121 \
+  torch==2.5.1 \
+  torchvision==0.20.1 \
+  torchaudio==2.5.1
+```
+
+Verify that PyTorch sees the P40 correctly:
+
+```bash
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda:", torch.version.cuda)
+print("device:", torch.cuda.get_device_name(0))
+print("capability:", torch.cuda.get_device_capability(0))
+PY
+```
+
+Expected capability on Tesla P40:
+
+```text
+(6, 1)
+```
+
+### 5. Build and install this fork for Pascal
+
+```bash
+export VLLM_TARGET_DEVICE=cuda
+export TORCH_CUDA_ARCH_LIST="6.1"
+python -m pip install -e . --no-build-isolation
+```
+
+If you want to reduce parallel build pressure on an older host:
+
+```bash
+export MAX_JOBS=1
+```
+
+and then run the same install command again.
+
+### 6. Install audio runtime packages used for Qwen ASR validation
+
+```bash
+python -m pip install librosa soundfile
+```
+
+### 7. Start the OpenAI-compatible API server for Qwen3-ASR on P40
+
+For P40, the stable runtime path is eager execution with conservative scheduler settings:
+
+```bash
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+vllm serve Qwen/Qwen3-ASR-1.7B \
+  --host 0.0.0.0 \
+  --port 8010 \
+  --served-model-name qwen3-asr-rt \
+  --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}' \
+  --max-model-len 4096 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.85 \
+  --limit-mm-per-prompt '{"audio":1}' \
+  --enforce-eager \
+  --disable-log-stats \
+  --no-enable-prefix-caching \
+  --no-enable-chunked-prefill \
+  --no-async-scheduling
+```
+
+If you already have the model in a local Hugging Face snapshot directory, replace `Qwen/Qwen3-ASR-1.7B` with that local path.
+
+### 8. Verify basic health
+
+```bash
+curl http://127.0.0.1:8010/health
+curl http://127.0.0.1:8010/v1/models
+```
+
+### 9. Known P40-specific runtime notes
+
+- This fork intentionally avoids FlashAttention/FlashInfer-style fast paths that are not usable on Pascal.
+- For Qwen3-ASR on P40, use the serve flags shown above. Removing them can reintroduce crashes or unstable behavior.
+- The validated path is vLLM serving plus Qwen3-ASR transcription / realtime transcription on P40.
+- Browser microphone capture still requires `localhost` or `HTTPS`; that is a browser security rule, not a vLLM limitation.
+
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.

@@ -7,11 +7,26 @@
 from .version import __version__, __version_tuple__  # isort:skip
 
 import typing
+from types import SimpleNamespace
+
+import torch
 
 # The environment variables override should be imported before any other
 # modules to ensure that the environment variables are set before any
 # other modules are imported.
 import vllm.env_override  # noqa: F401
+
+if not hasattr(torch, "accelerator"):
+    if torch.version.cuda is not None:
+        torch.accelerator = SimpleNamespace(  # type: ignore[attr-defined]
+            empty_cache=torch.cuda.empty_cache,
+            synchronize=torch.cuda.synchronize,
+        )
+    elif torch.version.hip is not None:
+        torch.accelerator = SimpleNamespace(  # type: ignore[attr-defined]
+            empty_cache=torch.cuda.empty_cache,
+            synchronize=torch.cuda.synchronize,
+        )
 
 MODULE_ATTRS = {
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
