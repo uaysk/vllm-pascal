@@ -18,6 +18,102 @@ IS_TURING = current_platform.get_device_capability() == (7, 5)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
+def _flatten_paged_key_cache(key_cache: torch.Tensor) -> torch.Tensor:
+    num_blocks, num_kv_heads, head_chunks, block_size, x = key_cache.shape
+    head_size = head_chunks * x
+    return key_cache.permute(0, 3, 1, 2, 4).reshape(
+        num_blocks * block_size, num_kv_heads, head_size
+    )
+
+
+def _flatten_paged_value_cache(value_cache: torch.Tensor) -> torch.Tensor:
+    num_blocks, num_kv_heads, head_size, block_size = value_cache.shape
+    return value_cache.permute(0, 3, 1, 2).reshape(
+        num_blocks * block_size, num_kv_heads, head_size
+    )
+
+
+def _run_torch_sdpa_prefix_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    b_loc: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    *,
+    sm_scale: float,
+    sliding_window: int,
+    skip_decode: bool,
+) -> None:
+    flat_k_cache = _flatten_paged_key_cache(k_cache)
+    flat_v_cache = _flatten_paged_value_cache(v_cache)
+    block_size = v_cache.shape[3]
+    enable_gqa = q.shape[1] > k.shape[1]
+    num_reqs = b_seq_len.shape[0]
+    neg_inf = torch.finfo(q.dtype).min
+
+    for req_idx in range(num_reqs):
+        start = int(b_start_loc[req_idx].item())
+        end = int(b_start_loc[req_idx + 1].item())
+        query_len = end - start
+
+        if skip_decode and query_len == 1:
+            continue
+
+        seq_len = int(b_seq_len[req_idx].item())
+        prefix_len = seq_len - query_len
+
+        if prefix_len > 0:
+            logical_positions = torch.arange(
+                prefix_len, device=q.device, dtype=torch.long
+            )
+            logical_blocks = torch.div(
+                logical_positions, block_size, rounding_mode="floor"
+            )
+            offsets = logical_positions.remainder(block_size)
+            physical_blocks = b_loc[req_idx, logical_blocks].to(torch.long)
+            slot_ids = physical_blocks * block_size + offsets
+            prefix_k = flat_k_cache.index_select(0, slot_ids)
+            prefix_v = flat_v_cache.index_select(0, slot_ids)
+            full_k = torch.cat((prefix_k, k[start:end]), dim=0)
+            full_v = torch.cat((prefix_v, v[start:end]), dim=0)
+        else:
+            full_k = k[start:end]
+            full_v = v[start:end]
+
+        q_i = q[start:end].movedim(0, 1).unsqueeze(0)
+        k_i = full_k.movedim(0, 1).unsqueeze(0)
+        v_i = full_v.movedim(0, 1).unsqueeze(0)
+
+        query_positions = prefix_len + torch.arange(
+            query_len, device=q.device
+        ).unsqueeze(1)
+        key_positions = torch.arange(seq_len, device=q.device).unsqueeze(0)
+        allowed = query_positions >= key_positions
+        if sliding_window > 0:
+            allowed &= (query_positions - key_positions) < sliding_window
+
+        attn_mask = torch.zeros((query_len, seq_len), dtype=q.dtype, device=q.device)
+        attn_mask.masked_fill_(~allowed, neg_inf)
+
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q_i,
+                k_i,
+                v_i,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=sm_scale,
+                enable_gqa=enable_gqa,
+            )
+
+        o[start:end].copy_(out.squeeze(0).movedim(1, 0))
+
+
 # Here's an example autotuner config for this kernel. This config does provide
 # a performance improvement, but dramatically increases first call latency in
 # triton 3.2. Because of this tradeoff, it's currently commented out.
@@ -648,6 +744,39 @@ def context_attention_fwd(
     sinks=None,
     is_block_table_ptr: bool = False,
 ):
+    query_lens = b_start_loc[1:] - b_start_loc[:-1]
+    prefix_lens = b_seq_len - query_lens
+
+    if (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(60)
+        and not current_platform.has_device_capability(80)
+        and alibi_slopes is None
+        and sinks is None
+        and "fp8" not in kv_cache_dtype
+        and fp8_out_scale is None
+        and not is_block_table_ptr
+    ):
+        if sm_scale is None:
+            sm_scale = 1.0 / (q.shape[-1] ** 0.5)
+        if sliding_window is None or sliding_window <= 0:
+            sliding_window = 0
+        _run_torch_sdpa_prefix_prefill(
+            q,
+            k,
+            v,
+            o,
+            k_cache,
+            v_cache,
+            b_loc,
+            b_start_loc,
+            b_seq_len,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            skip_decode=skip_decode,
+        )
+        return
+
     q_dtype_is_f32 = q.dtype is torch.float32
 
     # Turing does have tensor core for float32 multiplication

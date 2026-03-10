@@ -18,6 +18,80 @@ from .prefix_prefill import context_attention_fwd
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
+def _flatten_paged_key_cache(key_cache: torch.Tensor) -> torch.Tensor:
+    num_blocks, num_kv_heads, head_chunks, block_size, x = key_cache.shape
+    head_size = head_chunks * x
+    return key_cache.permute(0, 3, 1, 2, 4).reshape(
+        num_blocks * block_size, num_kv_heads, head_size
+    )
+
+
+def _flatten_paged_value_cache(value_cache: torch.Tensor) -> torch.Tensor:
+    num_blocks, num_kv_heads, head_size, block_size = value_cache.shape
+    return value_cache.permute(0, 3, 1, 2).reshape(
+        num_blocks * block_size, num_kv_heads, head_size
+    )
+
+
+def _run_torch_paged_decode_fallback(
+    query: torch.Tensor,
+    output: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    sliding_window: int,
+    sm_scale: float,
+) -> None:
+    flat_k = _flatten_paged_key_cache(key_cache)
+    flat_v = _flatten_paged_value_cache(value_cache)
+    block_size = value_cache.shape[3]
+    neg_inf = torch.finfo(query.dtype).min
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    enable_gqa = query.shape[1] > key_cache.shape[1]
+
+    for req_idx, query_len in enumerate(query_lens.tolist()):
+        if query_len != 1:
+            continue
+
+        start = int(query_start_loc[req_idx].item())
+        seq_len = int(seq_lens[req_idx].item())
+        logical_positions = torch.arange(seq_len, device=query.device, dtype=torch.long)
+        logical_blocks = torch.div(logical_positions, block_size, rounding_mode="floor")
+        offsets = logical_positions.remainder(block_size)
+        physical_blocks = block_table[req_idx, logical_blocks].to(torch.long)
+        slot_ids = physical_blocks * block_size + offsets
+
+        k_i = flat_k.index_select(0, slot_ids)
+        v_i = flat_v.index_select(0, slot_ids)
+        q_i = query[start : start + 1].movedim(0, 1).unsqueeze(0)
+        k_i = k_i.movedim(0, 1).unsqueeze(0)
+        v_i = v_i.movedim(0, 1).unsqueeze(0)
+
+        attn_mask = None
+        if sliding_window > 0:
+            k_positions = torch.arange(seq_len, device=query.device).unsqueeze(0)
+            allowed = (seq_len - 1 - k_positions) < sliding_window
+            attn_mask = torch.zeros((1, seq_len), dtype=query.dtype, device=query.device)
+            attn_mask.masked_fill_(~allowed, neg_inf)
+
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q_i,
+                k_i,
+                v_i,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=sm_scale,
+                enable_gqa=enable_gqa,
+            )
+
+        output[start : start + 1].copy_(out.squeeze(0).movedim(1, 0))
+
+
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
@@ -325,6 +399,28 @@ def chunked_prefill_paged_decode(
 
         key_cache = key_cache.view(target_dtype)
         value_cache = value_cache.view(target_dtype)
+
+    if (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(60)
+        and not current_platform.has_device_capability(80)
+        and "fp8" not in kv_cache_dtype
+        and alibi_slopes is None
+        and sinks is None
+        and not is_block_table_ptr
+    ):
+        _run_torch_paged_decode_fallback(
+            query=query,
+            output=output,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            block_table=block_table,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            sliding_window=sliding_window,
+            sm_scale=sm_scale,
+        )
+        return
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 

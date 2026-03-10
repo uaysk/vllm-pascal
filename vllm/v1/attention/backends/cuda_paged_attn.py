@@ -293,6 +293,56 @@ class CudaPagedAttentionImpl(AttentionImpl):
             )
             output[start:end].copy_(out.squeeze(0).movedim(1, 0))
 
+    def _run_sdpa_sliding_window_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_reqs: int,
+    ) -> None:
+        enable_gqa = self.num_heads > self.num_kv_heads
+        window_left, window_right = self.sliding_window
+        neg_inf = torch.finfo(query.dtype).min
+        for req_idx in range(num_reqs):
+            start = int(query_start_loc[req_idx].item())
+            end = int(query_start_loc[req_idx + 1].item())
+            seq_len = end - start
+
+            q = query[start:end].movedim(0, 1).unsqueeze(0)
+            k = key[start:end].movedim(0, 1).unsqueeze(0)
+            v = value[start:end].movedim(0, 1).unsqueeze(0)
+
+            q_positions = torch.arange(seq_len, device=q.device).unsqueeze(1)
+            k_positions = torch.arange(seq_len, device=q.device).unsqueeze(0)
+            allowed = q_positions >= k_positions
+            if window_left >= 0:
+                allowed &= (q_positions - k_positions) <= window_left
+            if window_right >= 0:
+                allowed &= (k_positions - q_positions) <= window_right
+
+            attn_mask = torch.zeros(
+                (seq_len, seq_len), dtype=q.dtype, device=q.device
+            )
+            attn_mask.masked_fill_(~allowed, neg_inf)
+
+            with torch.nn.attention.sdpa_kernel(
+                torch.nn.attention.SDPBackend.MATH
+            ):
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    attn_mask=attn_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=self.scale,
+                    enable_gqa=enable_gqa,
+                )
+
+            output[start:end].copy_(out.squeeze(0).movedim(1, 0))
+
     def _run_cuda_decode_attention(
         self,
         layer: AttentionLayer,
@@ -471,6 +521,24 @@ class CudaPagedAttentionImpl(AttentionImpl):
                     num_decodes,
                     attn_metadata.seq_lens.shape[0],
                 )
+            elif (
+                current_platform.is_cuda()
+                and current_platform.has_device_capability(60)
+                and not current_platform.has_device_capability(80)
+                and has_prefill
+                and not has_extend
+                and self.sliding_window != (-1, -1)
+                and bool(torch.all(query_lens > 1).item())
+            ):
+                self._run_sdpa_sliding_window_prefill(
+                    query,
+                    key,
+                    value,
+                    output,
+                    attn_metadata.query_start_loc,
+                    attn_metadata.seq_lens.shape[0],
+                )
+                used_fast_paths = True
             if self._run_cuda_decode_attention(
                 layer, query, key_cache, value_cache, attn_metadata, output
             ):

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -30,6 +31,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.backends.cuda_paged_attn import CudaPagedAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 try:
@@ -213,6 +215,7 @@ def create_whisper_attention_backend_with_block_pooling(
         b
         for b in (
             AiterFlashAttentionBackend,
+            CudaPagedAttentionBackend,
             FlashAttentionBackend,
             RocmAttentionBackend,
             TritonAttentionBackend,
@@ -302,6 +305,16 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             block_size,
             attn_type=attn_type,
         )
+        device_capability = current_platform.get_device_capability()
+        if (
+            current_platform.is_cuda()
+            and device_capability is not None
+            and device_capability.major < 8
+            and underlying_attn_backend is TritonAttentionBackend
+        ):
+            # Triton attention is unstable on Pascal for Voxtral realtime's
+            # whisper-causal block-pooling path; prefer the CUDA paged backend.
+            underlying_attn_backend = CudaPagedAttentionBackend
         attn_backend = create_whisper_attention_backend_with_block_pooling(
             underlying_attn_backend, block_pool_size
         )
