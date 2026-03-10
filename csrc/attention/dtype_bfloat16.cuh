@@ -421,7 +421,7 @@ inline __device__ void from_float(__nv_bfloat162& dst, float2 src) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
-  dst = __float22bfloat162_rn(src);
+  dst = __halves2bfloat162(__float2bfloat16(src.x), __float2bfloat16(src.y));
 #endif
 }
 
@@ -429,8 +429,10 @@ inline __device__ void from_float(bf16_4_t& dst, Float4_ src) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
-  dst.x = __float22bfloat162_rn(src.x);
-  dst.y = __float22bfloat162_rn(src.y);
+  dst.x = __halves2bfloat162(__float2bfloat16(src.x.x),
+                             __float2bfloat16(src.x.y));
+  dst.y = __halves2bfloat162(__float2bfloat16(src.y.x),
+                             __float2bfloat16(src.y.y));
 #endif
 }
 
@@ -438,10 +440,14 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
-  dst.x = __float22bfloat162_rn(src.x);
-  dst.y = __float22bfloat162_rn(src.y);
-  dst.z = __float22bfloat162_rn(src.z);
-  dst.w = __float22bfloat162_rn(src.w);
+  dst.x = __halves2bfloat162(__float2bfloat16(src.x.x),
+                             __float2bfloat16(src.x.y));
+  dst.y = __halves2bfloat162(__float2bfloat16(src.y.x),
+                             __float2bfloat16(src.y.y));
+  dst.z = __halves2bfloat162(__float2bfloat16(src.z.x),
+                             __float2bfloat16(src.z.y));
+  dst.w = __halves2bfloat162(__float2bfloat16(src.w.x),
+                             __float2bfloat16(src.w.y));
 #endif
 }
 

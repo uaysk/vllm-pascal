@@ -312,7 +312,8 @@ __device__ __forceinline__ float2 cast_to_float2(const packed_t& val) {
 template <typename packed_t>
 __device__ __forceinline__ packed_t cast_to_packed(const float2& val) {
   if constexpr (std::is_same_v<packed_t, __nv_bfloat162>) {
-    return __float22bfloat162_rn(val);
+    return __halves2bfloat162(__float2bfloat16(val.x),
+                              __float2bfloat16(val.y));
   } else if constexpr (std::is_same_v<packed_t, __half2>) {
     return __float22half2_rn(val);
   } else if constexpr (std::is_same_v<packed_t, float2>) {

@@ -86,7 +86,7 @@ struct _typeConvert<c10::BFloat16> {
     return __float2bfloat16(x);
   }
   __device__ static __forceinline__ packed_hip_type convert(float2 x) {
-    return __float22bfloat162_rn(x);
+    return __halves2bfloat162(__float2bfloat16(x.x), __float2bfloat16(x.y));
   }
 };
   #endif  // (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800) ||

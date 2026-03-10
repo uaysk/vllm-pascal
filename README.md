@@ -25,22 +25,42 @@ This fork is patched to run vLLM on NVIDIA Tesla P40 / Pascal (`sm_61`) and has 
 
 Tested environment:
 
+- OS: Ubuntu 24.04 / Linux x86_64
 - GPU: Tesla P40 (`sm_61`)
-- Python: `3.12`
+- Python: `3.12.3`
+- Virtual environment: `.venv-p40`
 - PyTorch: `2.5.1+cu121`
-- CUDA toolkit used for build: `12.1`
+- CUDA runtime from PyTorch wheel: `12.1`
+- CUDA toolkit used for local source build: `12.2` (`/usr/local/cuda-12.2`)
+- Host compiler used for `nvcc`: `gcc-12` / `g++-12`
+- System default GCC on this machine: `13.3.0`
 - Recommended install mode: in a dedicated `venv`, then `pip install -e . --no-build-isolation`
 
 The commands below are the reproducible path used to build and run this fork on P40.
 
-### 1. Clone the fork
+### 1. Install system packages required by the current build environment
+
+The current machine is Ubuntu 24.04 and `nvcc 12.2` does not accept the
+default `gcc 13` toolchain. Install and use `gcc-12` / `g++-12`.
+
+```bash
+sudo apt update
+sudo apt install -y \
+  python3.12-venv \
+  gcc-12 \
+  g++-12 \
+  cmake \
+  ninja-build
+```
+
+### 2. Clone the fork
 
 ```bash
 git clone https://github.com/uaysk/vllm-pascal.git
 cd vllm-pascal
 ```
 
-### 2. Create and activate a virtual environment
+### 3. Create and activate a virtual environment
 
 ```bash
 python3.12 -m venv .venv-p40
@@ -48,7 +68,7 @@ source .venv-p40/bin/activate
 python -m pip install --upgrade pip
 ```
 
-### 3. Install build tools
+### 4. Install Python build tools
 
 ```bash
 python -m pip install \
@@ -62,9 +82,10 @@ python -m pip install \
   protobuf
 ```
 
-### 4. Install a P40-compatible PyTorch stack
+### 5. Install a P40-compatible PyTorch stack
 
-The fork has been tested with CUDA 12.1 wheels:
+The fork has been tested with CUDA 12.1 wheels. This is separate from the local
+CUDA toolkit used to compile extensions.
 
 ```bash
 python -m pip install \
@@ -92,7 +113,25 @@ Expected capability on Tesla P40:
 (6, 1)
 ```
 
-### 5. Build and install this fork for Pascal
+### 6. Configure the local CUDA 12.2 toolchain used for source builds
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.2
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+export CC=/usr/bin/gcc-12
+export CXX=/usr/bin/g++-12
+export CMAKE_ARGS="-DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12"
+```
+
+Confirm the compiler and toolkit before building:
+
+```bash
+nvcc --version
+g++-12 --version | head -n 1
+```
+
+### 7. Build and install this fork for Pascal
 
 ```bash
 export VLLM_TARGET_DEVICE=cuda
@@ -108,13 +147,17 @@ export MAX_JOBS=1
 
 and then run the same install command again.
 
-### 6. Install audio runtime packages used for Qwen ASR validation
+If you build without `g++-12`, `nvcc 12.2` can fail early with an
+`unsupported GNU version` error on Ubuntu 24.04 because the system default is
+GCC 13.
+
+### 8. Install audio runtime packages used for Qwen ASR validation
 
 ```bash
 python -m pip install librosa soundfile
 ```
 
-### 7. Start the OpenAI-compatible API server for Qwen3-ASR on P40
+### 9. Start the OpenAI-compatible API server for Qwen3-ASR on P40
 
 For P40, the stable runtime path is eager execution with conservative scheduler settings:
 
@@ -138,14 +181,14 @@ vllm serve Qwen/Qwen3-ASR-1.7B \
 
 If you already have the model in a local Hugging Face snapshot directory, replace `Qwen/Qwen3-ASR-1.7B` with that local path.
 
-### 8. Verify basic health
+### 10. Verify basic health
 
 ```bash
 curl http://127.0.0.1:8010/health
 curl http://127.0.0.1:8010/v1/models
 ```
 
-### 9. Known P40-specific runtime notes
+### 11. Known P40-specific runtime notes
 
 - This fork intentionally avoids FlashAttention/FlashInfer-style fast paths that are not usable on Pascal.
 - For Qwen3-ASR on P40, use the serve flags shown above. Removing them can reintroduce crashes or unstable behavior.
