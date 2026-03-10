@@ -21,7 +21,9 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ## Tesla P40 Build And Run
 
-This fork is patched to run vLLM on NVIDIA Tesla P40 / Pascal (`sm_61`) and has been validated with `Qwen/Qwen3-ASR-1.7B`.
+This fork is patched to run vLLM on NVIDIA Tesla P40 / Pascal (`sm_61`) and
+includes Pascal/P40 support for realtime audio serving paths such as
+`mistralai/Voxtral-Mini-4B-Realtime-2602`.
 
 Tested environment:
 
@@ -35,6 +37,11 @@ Tested environment:
 - Host compiler used for `nvcc`: `gcc-12` / `g++-12`
 - System default GCC on this machine: `13.3.0`
 - Recommended install mode: in a dedicated `venv`, then `pip install -e . --no-build-isolation`
+
+Validated models on this fork:
+
+- `Qwen/Qwen3-ASR-1.7B`
+- `mistralai/Voxtral-Mini-4B-Realtime-2602`
 
 The commands below are the reproducible path used to build and run this fork on P40.
 
@@ -181,18 +188,45 @@ vllm serve Qwen/Qwen3-ASR-1.7B \
 
 If you already have the model in a local Hugging Face snapshot directory, replace `Qwen/Qwen3-ASR-1.7B` with that local path.
 
-### 10. Verify basic health
+### 10. Start the OpenAI-compatible realtime API server for Voxtral Mini 4B on P40
+
+`Voxtral Mini 4B Realtime` support has been added in this fork specifically for
+Pascal/P40. A minimal serving command is:
+
+```bash
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
+  --host 0.0.0.0 \
+  --port 8011 \
+  --served-model-name voxtral-mini-rt \
+  --enforce-eager \
+  --max-num-seqs 1 \
+  --disable-log-stats \
+  --no-enable-prefix-caching \
+  --no-enable-chunked-prefill \
+  --no-async-scheduling
+```
+
+Client examples for the realtime WebSocket endpoint are available in:
+
+- `examples/online_serving/openai_realtime_client.py`
+- `examples/online_serving/openai_realtime_microphone_client.py`
+- `examples/online_serving/openai_realtime_upload_web_demo.py`
+
+### 11. Verify basic health
 
 ```bash
 curl http://127.0.0.1:8010/health
 curl http://127.0.0.1:8010/v1/models
 ```
 
-### 11. Known P40-specific runtime notes
+### 12. Known P40-specific runtime notes
 
 - This fork intentionally avoids FlashAttention/FlashInfer-style fast paths that are not usable on Pascal.
 - For Qwen3-ASR on P40, use the serve flags shown above. Removing them can reintroduce crashes or unstable behavior.
-- The validated path is vLLM serving plus Qwen3-ASR transcription / realtime transcription on P40.
+- Voxtral realtime support is included for Pascal/P40 in this fork.
+- On Pascal, Voxtral realtime uses safer attention/backend fallbacks instead of unstable Triton paths.
+- The validated path is vLLM serving plus Qwen3-ASR transcription / realtime transcription on P40, and Voxtral Mini 4B Realtime serving on P40.
 - Browser microphone capture still requires `localhost` or `HTTPS`; that is a browser security rule, not a vLLM limitation.
 
 ## About
