@@ -25,6 +25,10 @@ from vllm.v1.sample.logits_processor.interface import (
     LogitsProcessor,
     MoveDirectionality,
 )
+from vllm.v1.sample.logits_processor.no_repeat_ngram import (
+    MinerULogitsProcessor,
+    NoRepeatNGramLogitsProcessor,
+)
 from vllm.v1.sample.logits_processor.state import BatchUpdateBuilder, LogitsProcessors
 
 if TYPE_CHECKING:
@@ -50,6 +54,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    NoRepeatNGramLogitsProcessor,
 ]
 
 

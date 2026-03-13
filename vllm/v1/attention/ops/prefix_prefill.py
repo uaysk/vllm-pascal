@@ -744,9 +744,6 @@ def context_attention_fwd(
     sinks=None,
     is_block_table_ptr: bool = False,
 ):
-    query_lens = b_start_loc[1:] - b_start_loc[:-1]
-    prefix_lens = b_seq_len - query_lens
-
     if (
         current_platform.is_cuda()
         and current_platform.has_device_capability(60)

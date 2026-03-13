@@ -22,8 +22,9 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 ## Tesla P40 Build And Run
 
 This fork is patched to run vLLM on NVIDIA Tesla P40 / Pascal (`sm_61`) and
-includes Pascal/P40 support for realtime audio serving paths such as
-`mistralai/Voxtral-Mini-4B-Realtime-2602`.
+has been validated with `Qwen/Qwen3-ASR-1.7B`,
+`mistralai/Voxtral-Mini-4B-Realtime-2602`, and
+`opendatalab/MinerU2.5-2509-1.2B`.
 
 Tested environment:
 
@@ -42,6 +43,7 @@ Validated models on this fork:
 
 - `Qwen/Qwen3-ASR-1.7B`
 - `mistralai/Voxtral-Mini-4B-Realtime-2602`
+- `opendatalab/MinerU2.5-2509-1.2B`
 
 The commands below are the reproducible path used to build and run this fork on P40.
 
@@ -158,10 +160,10 @@ If you build without `g++-12`, `nvcc 12.2` can fail early with an
 `unsupported GNU version` error on Ubuntu 24.04 because the system default is
 GCC 13.
 
-### 8. Install audio runtime packages used for Qwen ASR validation
+### 8. Install runtime packages used for Qwen ASR, Voxtral, and MinerU validation
 
 ```bash
-python -m pip install librosa soundfile
+python -m pip install librosa soundfile pillow "mineru-vl-utils[vllm]"
 ```
 
 ### 9. Start the OpenAI-compatible API server for Qwen3-ASR on P40
@@ -188,19 +190,89 @@ vllm serve Qwen/Qwen3-ASR-1.7B \
 
 If you already have the model in a local Hugging Face snapshot directory, replace `Qwen/Qwen3-ASR-1.7B` with that local path.
 
-### 10. Start the OpenAI-compatible realtime API server for Voxtral Mini 4B on P40
+### 10. Start the OpenAI-compatible API server for MinerU2.5 on P40
 
-`Voxtral Mini 4B Realtime` support has been added in this fork specifically for
-Pascal/P40. A minimal serving command is:
+`opendatalab/MinerU2.5-2509-1.2B` uses the existing `Qwen2-VL` model path in
+vLLM. The official model card recommends a logits processor for
+`no_repeat_ngram_size`; this fork includes that processor built in, so you do
+not need an extra `--logits-processors` flag.
+
+The model card is published with `torch_dtype=bfloat16`, but Tesla P40 does not
+support BF16. Use `--dtype half` explicitly for Pascal:
+
+```bash
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+vllm serve opendatalab/MinerU2.5-2509-1.2B \
+  --host 0.0.0.0 \
+  --port 8011 \
+  --served-model-name mineru25-p40 \
+  --dtype half \
+  --max-model-len 4096 \
+  --limit-mm-per-prompt '{"image":1}' \
+  --gpu-memory-utilization 0.85 \
+  --enforce-eager \
+  --max-num-seqs 1 \
+  --disable-log-stats \
+  --no-enable-prefix-caching \
+  --no-enable-chunked-prefill \
+  --no-async-scheduling
+```
+
+If you already downloaded the model to a local Hugging Face snapshot directory,
+replace `opendatalab/MinerU2.5-2509-1.2B` with that local path.
+
+Minimal extraction example with `mineru-vl-utils`:
+
+```bash
+python - <<'PY'
+from PIL import Image
+from mineru_vl_utils import MinerUClient
+
+client = MinerUClient(
+    backend="http-client",
+    server_url="http://127.0.0.1:8011",
+)
+
+image = Image.open("/path/to/page.png")
+blocks = client.two_step_extract(image)
+print(blocks[:3])
+PY
+```
+
+Validated MinerU result on this P40 environment:
+
+- Model path: local Hugging Face snapshot of `opendatalab/MinerU2.5-2509-1.2B`
+- Test input: single document page image through `MinerUClient.two_step_extract`
+- Observed cold load time: about `143s`
+- Observed layout detect time: about `82s`
+- Observed extract time: about `134s` on the first run
+- Output quality check: document header, journal line, figure caption, and formula text were extracted correctly on the validation sample
+
+Two warnings can still appear during layout detection on the validation sample:
+
+- `Warning: The output was truncated due to length limit.`
+- `Warning: line does not match layout format: <|box_start|>844 119 958 124`
+
+In the validated P40 run these warnings did not prevent extraction; the model still returned `122` parsed blocks successfully.
+
+### 11. Start the OpenAI-compatible realtime API server for Voxtral Mini 4B on P40
+
+`Voxtral Mini 4B Realtime` support is included in this fork for Pascal/P40.
+Use the same conservative runtime settings as the validated path:
 
 ```bash
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
   --host 0.0.0.0 \
-  --port 8011 \
+  --port 8012 \
   --served-model-name voxtral-mini-rt \
   --enforce-eager \
+  --tokenizer-mode mistral \
+  --config-format mistral \
+  --load-format mistral \
+  --max-model-len 4096 \
   --max-num-seqs 1 \
+  --gpu-memory-utilization 0.85 \
   --disable-log-stats \
   --no-enable-prefix-caching \
   --no-enable-chunked-prefill \
@@ -213,20 +285,27 @@ Client examples for the realtime WebSocket endpoint are available in:
 - `examples/online_serving/openai_realtime_microphone_client.py`
 - `examples/online_serving/openai_realtime_upload_web_demo.py`
 
-### 11. Verify basic health
+### 12. Verify basic health
 
 ```bash
 curl http://127.0.0.1:8010/health
 curl http://127.0.0.1:8010/v1/models
+curl http://127.0.0.1:8011/health
+curl http://127.0.0.1:8011/v1/models
+curl http://127.0.0.1:8012/health
+curl http://127.0.0.1:8012/v1/models
 ```
 
-### 12. Known P40-specific runtime notes
+### 13. Known P40-specific runtime notes
 
 - This fork intentionally avoids FlashAttention/FlashInfer-style fast paths that are not usable on Pascal.
 - For Qwen3-ASR on P40, use the serve flags shown above. Removing them can reintroduce crashes or unstable behavior.
 - Voxtral realtime support is included for Pascal/P40 in this fork.
 - On Pascal, Voxtral realtime uses safer attention/backend fallbacks instead of unstable Triton paths.
-- The validated path is vLLM serving plus Qwen3-ASR transcription / realtime transcription on P40, and Voxtral Mini 4B Realtime serving on P40.
+- For MinerU2.5 on P40, force `--dtype half` and keep `--max-num-seqs 1` unless you have verified a larger concurrency setting on your card.
+- MinerU2.5 uses the existing Qwen2-VL implementation in this fork; Pascal uses safe pre-Volta attention fallbacks for the vision path.
+- This fork includes built-in handling for MinerU's `no_repeat_ngram_size` extra arg, so `mineru-vl-utils` works without adding a separate logits processor plugin.
+- The validated path is vLLM serving plus Qwen3-ASR transcription / realtime transcription on P40, Voxtral Mini 4B Realtime serving on P40, and MinerU2.5 document parsing on P40.
 - Browser microphone capture still requires `localhost` or `HTTPS`; that is a browser security rule, not a vLLM limitation.
 
 ## About
